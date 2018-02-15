@@ -1,0 +1,27 @@
+{
+  "name": "JimboBot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "dependencies": {
+    "discord.js": "^11.2.1",
+    "node-osu": "^1.3.0",
+    "osu-parser": "^0.3.3",
+    "request": "^2.83.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ayyEve/discord-score-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ayyEve/discord-score-bot/issues"
+  },
+  "homepage": "https://github.com/ayyEve/discord-score-bot#readme"
+}
