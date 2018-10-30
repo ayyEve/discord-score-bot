@@ -1,12 +1,9 @@
 // Requires
 var fs = require('fs');
-var readline = require('readline');
 var Discord = require('discord.js');
 var osu = require('node-osu'); //https://www.npmjs.com/package/node-osu
-var request = require('request');
-var ppCalc = require('./ppCalc.js');
+var cleverbot = require("cleverbot.io");
 var settings = require('./settings.json');
-var BeatmapDatabase = require('./dataCache.js');
 
 // Vars
 // keys
@@ -15,34 +12,53 @@ var discordKey = settings.discordKey;
 
 // others
 var bot = new Discord.Client();
-global.osuApi = new osu.Api(osuKey);
+var cbot = new cleverbot(settings.cleverbotUser, settings.cleverbotKey);
+global.osuApi = new osu.Api(osuKey);  
 var data = [], channel = settings.channel;
 var modes = ['Standard','Taiko', 'Ctb', 'Mania'];
 var userScores = {}; // key array (object) storing user scores, key is user id + "_" _ modes
-// userScores['id'].scores
-// userScores['id'].ranks.global
-// userScores['id'].ranks.country
+var beatmaps = {}; // beatmaps[beatmapid] = []; // beatmaps[beatmapid][mode];
+// userScores['id_mode'].scores
+// userScores['id_mode'].ranks.global
+// userScores['id_mode'].ranks.country
+// userScores['id_mode'].acc
 // consts
 const prefix = '-';
-const updateTime = 20000; // every 20 seconds
 const VERBOSE = settings.VERBOSE;
 global.VERBOSE = VERBOSE;
 
 // Functions
-BeatmapDatabase.init(osuApi)
+cbot.setNick("osuBot"); 
 bot.on('ready', () => {
   console.log(`Logged in as ${bot.user.tag}!`);
   bot.user.setStatus("online");
+  bot.user.setActivity("Loading...");
+  
+  // load new ava if file exists
+  if (fs.existsSync("./avatar.png")) {
+    bot.user.setAvatar("./avatar.png").then(()=>fs.unlink("./avatar.png"));
+  }
+
+  // change the channel id to an actual channel object
+  channel = bot.guilds.array()[0].channels.get(channel);
+  var ready = true;
+
+  // load beatmap database
+  beatmaps = data.beatmaps || {};
 
   // check for data, and load
   if (fs.existsSync('./data.json')) {
     // load file and set
     var newData = require('./data.json');
+    ready = false;
+    if (newData.data.length == 0) {
+      ready = true;
+    }
     let timer = 0;
+    let counter = 0;
     for (let i in newData.data) {
       let d = new Data(newData.data[i].username, newData.data[i].mode, newData.data[i].user);
       data.push(d);
-
       setTimeout(() => {
         // load user bests
         osuApi.getUserBest({u:d.user, m:d.mode, type:'id', limit:100, a:1}).then(scores => {
@@ -52,21 +68,53 @@ bot.on('ready', () => {
               let obj = {};
               obj.scores = scores.sort(sortScore);
               obj.ranks = {g:user_.pp.rank, c:user_.pp.countryRank};
+              obj.acc = user_.accuracy;
               userScores[user_.id+"_"+d.mode] = obj;
-            }).catch(ignore);
+              counter++;
+              if (counter == newData.data.length) {
+                ready = true;
+              }
+            }).catch((e) => {
+              ignore(e);
+              counter++;
+              if (counter == newData.data.length) {
+                ready = true;
+              }
+            });
           }, 40);
-        }).catch(ignore);
+        }).catch((e) => {
+          ignore(e);
+          counter++;
+          if (counter == newData.data.length) {
+            ready = true;
+          }
+        });
       }, timer);
       timer+=500;
     }
   }
-  setGame();
-  checkAll();
+
+  // loop until all the users are loaded in
+  var startupTimer = setInterval(() => {
+    if (ready) {
+      console.log('ready');
+      setGame();
+      clearInterval(startupTimer);
+      // start checking users
+      var CHECKcount = 0;
+      setInterval(() => {
+        if (CHECKcount > data.length) CHECKcount = 0;
+        if (data[CHECKcount]) check(data[CHECKcount]);
+        CHECKcount++;
+      }, 500);
+    }
+  }, 50);
 });
+
 bot.on('message', onMessage);
 bot.login(discordKey);
 
-// helpers
+// functions
 function ignore(e) {
   if (VERBOSE) console.log(e);
 }
@@ -76,57 +124,62 @@ function sortScore(a, b) {
   // finally the calculation
   return parseFloat(b.pp) - parseFloat(a.pp);
 }
-function addUser(user, mode) {
+
+// bot functions
+function addUser(chan, user, mode) {
   for (let i in data) {
     if (data[i].username == user && data[i].mode == mode) {
-      sendMessage("I am already tracking "+ user +" for that mode!");
+      chan.send("I am already tracking "+ user +" for that mode!");
       return;
     }
   }
+  // get the user from osu
   osuApi.getUser({u: user, type: 'string'}).then(user_ => {
     data.push(new Data(user_.username||user, mode, user_.id));
-    sendMessage('Now tracking ' + (user_.username||user) +"'s " + modes[mode].toLowerCase() + " scores.");
+    chan.send('Now tracking ' + (user_.username||user) +"'s " + modes[mode].toLowerCase() + " scores.");
     save();
     setTimeout(() => {
       osuApi.getUserBest({u:user_.id, m:mode, type:'id', limit:100, a:1}).then(scores => {
         let obj = {};
         obj.scores = scores.sort(sortScore);
         obj.ranks = {g:user_.pp.rank, c:user_.pp.countryRank};
+        obj.acc = user_.accuracy;
         userScores[user_.id+"_"+mode] = obj;
         setGame();
       }).catch(ignore);
     }, 4000);
   }).catch(e => {
-    if (e.message.includes("not found")) sendMessage("That user was not found :c");
+    if (e.message.includes("not found")) chan.send("That user was not found :c");
     else ignore(e);
   });
   save();
 }
-function remUser(user, mode) {
+function remUser(chan, user, mode) {
   for (let i in data) {
     if (data[i].username == user && data[i].mode == mode) {
       delete (data[i]);
-      sendMessage("I am no longer following " + user + " for mode " + modes[mode]);
+      chan.send("I am no longer following " + user + " for mode " + modes[mode]);
       save();
       setGame();
       return;
     }
   }
-
-  sendMessage("I am not tracking " + user + " for that mode!");
+  chan.send("I am not tracking " + user + " for that mode!");
 }
-function updateUser(user) {
+function updateUser(chan, user) {
   user = user.toLowerCase();
   for (let i in data) {
     if (data[i].username.toLowerCase() == user) {
       osuApi.getUser(data[i].getOptions()).then((u) => {
-        sendMessage("Updated " + data[i].username + " -> " + u.name + " for mode " + modes[data[i].mode]);
+        chan.send("Updated " + data[i].username + " -> " + u.name + " for mode " + modes[data[i].mode]);
         data[i].username = u.name;
         save();
-      });
+      }).catch(ignore);
     }
   }
 }
+
+// function to set the "now playing" to how many users we are tracking
 function setGame() {
   setTimeout(()=>{
     let count = 0;
@@ -137,19 +190,30 @@ function setGame() {
         count++;
       }
     }
-    bot.user.setGame('Checking ' + count + ' users!');
+    bot.user.setActivity('Checking ' + count + ' users!');
   }, 50);
 }
 
 //TODO
 function onMessage(msg) {
+  // stuff to do if there is no prefix
   if (!msg.content.startsWith(prefix)) {
+    // check for mentions
+    // if the bot was mentioned, reply with a cleverbot reply
     if (msg.mentions.users.has(bot.user.id)) {
-      if (msg.content.toLowerCase().includes('cookie')) {
-        if (!msg.content.toLowerCase().includes("t!cookie")) msg.channel.sendMessage("i need moar");
-      }
-      else msg.channel.sendMessage("im hungry\ngimme cookies");
+      // initialize cleverbot
+      cbot.create(function (err, session) {
+        // Woo, you initialized cleverbot.io.  Insert further code here
+        msg.channel.startTyping();
+        cbot.ask(msg.content.replace(bot.user.toString(),""), (err1, response) => {
+          msg.channel.stopTyping();
+          msg.channel.send(response + " nyaa~");
+        });
+      });
+      return;
     }
+
+    // osu links (needs to be updated for new site links)
     if (msg.content.includes('osu.ppy.sh/b/')) {
       try {
         let regex = /osu.ppy.sh\/b\/\d{1,8}(\?m=\d)*/;
@@ -157,23 +221,36 @@ function onMessage(msg) {
         let mode = id.split('?m=');
         id = mode[0];
         mode = mode[1];
-        beatmapInfo(id, mode||0, msg.channel.id);
+        beatmapInfo(id, mode||0, msg.channel);
       } catch(e) {
         console.log(e);
       }
+    } else if (msg.content.includes('osu.ppy.sh/beatmapsets')) {
+      // https://osu.ppy.sh/beatmapsets/801506#osu/1682424
+      let split = msg.content.split('/');
+      let id = split[split.length-1];
+      let mode = undefined;
+      for (let i in modes) if (msg.content.includes(modes[i])) mode = i;
+      beatmapInfo(id, mode, msg.channel);
     }
+    // return so we dont continue into commands
     return;
   }
 
+  // _ing _ong stuff
   msg.content = msg.content.substring(prefix.length);
+  if (msg.content.endsWith("ing")) {
+    let str = msg.content.split("ing").join("ong");
+    msg.channel.send(str);
+    return;
+  }
+
+  // bot commands 
   var s = msg.content.split(' ');
   let user = s[1], mode = s[2];
   switch (s[0]) {
-    case "ping":
-      msg.channel.send("pong!");
-      break;
     case "track":
-      if (!mode) addUser(user, 0); else {
+      if (!mode) addUser(msg.channel, user, 0); else {
         let q = mode.split(',');
         for (let i in q) {
           i=q[i].trim();
@@ -183,12 +260,12 @@ function onMessage(msg) {
             case'm':mode=3;break;
             default:mode=0;break;
           }
-          addUser(user, mode)
+          addUser(msg.channel, user, mode)
         }
       }
       break;
     case "untrack":
-      if (!mode) remUser(user, 0); else {
+      if (!mode) remUser(msg.channel, user, 0); else {
         let q = mode.split(',');
         for (let i in q) {
           i=q[i].trim();
@@ -198,141 +275,140 @@ function onMessage(msg) {
             case'm':mode=3;break;
             default:mode=0;break;
           }
-          remUser(user, mode)
+          remUser(msg.channel, user, mode)
         }
       }
       break;
-    case "pp":
-      let x = msg.content.split(' ');
-      x.shift();
-      msg.content = x.join(' ');
-      ppCalc(msg.content, sendMessage, msg.channel.id);
-      break;
-    case 'update':
-      updateUser(user);
-      break
-    case 'help': help(msg.channel.id); break;
+    case 'update': updateUser(msg.channel, user); break
+    case 'help': help(msg.channel); break;
     case 'info': info(s[1]); break;
   }
 }
-function help(channel_) {
+// maybe remake this so it uses embeds?
+function help(c) {
   let help_ = "do `-track [username] [mode,[mode]]` to track\n";
-  help_ += "ex, `-track remii standard, taiko` or if you're lazy `-track remii s,t`";
-  sendMessage(help_, undefined, channel_);
+  help_ += "ex, `-track remii standard, taiko` or if you're lazy `-track remii s,t`\n";
+  help_ += "to stop tracking, do `-untrack [username] [mode,[mode]]`\n";
+  help_ += "ex `-untrack remii standard, taiko` or if you're lazy `-untrack remii s,t`\n";
+  help_ += "if you have changed your username in osu, the bot will not recognise this.\n"
+  help_ += "to fix this, please run `-update [old username]`"
+  c.send(help_);
 }
-function sendMessage(txt, options, channelOverride, then) {
-  let c = channelOverride;
-  if (!c) c = channel;
-  if (!c) return;
-  try {
-    bot.guilds.array()[0].channels.get(c).send(txt, options).then(then).catch(ignore);
-  } catch (e) {
-    console.log(e);
-  }
-}
+
+// send user data to `channel`
 function sendData(data, score, number, newScores) {
   let userThings = userScores[data.user+"_"+data.mode];
   let oldScores = userThings.scores;
-  BeatmapDatabase.getBeatmaps({b:score.beatmapId}).then(beatmap => {
-    beatmap = beatmap[0];
-    // update the user ranks
-    //calc diff in pp
-    let ppOld = 0, ppNew = 0;
-    for (let n in newScores) {
-      ppOld += parseFloat(newScores[n].pp * Math.pow(0.95, n));
-      if (oldScores[n])
-        ppNew += parseFloat(oldScores[n].pp * Math.pow(0.95, n));
-    }
-    if (ppOld-ppNew == 0) return; // fixes weird bug
-    if (ppOld-ppNew<0) {
-      score = oldScores[number-1];
-      //look for the beatmap
-      for (let n = number-5; n < oldScores.length; n++) {
-        let newScore = newScores[n];
-        if (newScore.beatmapId == score.beatmapId) {
-          score = newScore;
-          number = n+1;
-          console.log("pp lost");
-          return sendData(data, score, number, newScores);
+  getBeatmap({b:score.beatmapId}).then(beatmap => {
+    osuApi.getUser(data.getOptions()).then(user_ => {
+      // update the user ranks
+      //calc diff in pp
+      let ppOld = 0, ppNew = 0;
+      for (let n in newScores) {
+        ppOld += parseFloat(newScores[n].pp * Math.pow(0.95, n));
+        if (oldScores[n])
+          ppNew += parseFloat(oldScores[n].pp * Math.pow(0.95, n));
+      }
+      if (ppOld-ppNew == 0) return; // fixes weird bug
+      if (ppOld-ppNew<0) {
+        score = oldScores[number-1];
+        //look for the beatmap
+        for (let n = number-5; n < oldScores.length; n++) {
+          let newScore = newScores[n];
+          if (newScore.beatmapId == score.beatmapId) {
+            score = newScore;
+            number = n+1;
+            console.log("pp lost");
+            return sendData(channel,  data, score, number, newScores);
+          }
         }
+        console.log("pp lost");
+        return;
       }
-      console.log("pp lost");
-      return;
-    }
 
-    // calc acc and max combo
-    let acc = 0, counts = score.counts, maxCombo=0;
-    for (let i in counts) counts[i] = parseInt(counts[i]);
-    try {
-      switch (data.mode) {
-        case 0: // standard
-          acc=(50*counts['50']+100*counts['100']+300*counts['300'])/(300*(counts['miss']+counts['50']+counts['100']+counts['300']));
-          //acc=(50*counts['50']+100*(counts['100']+counts['katu'])+300*(counts['300']+counts['geki']))/(300*(counts['miss']+counts['50']+counts['100']+counts['katu']+counts['300']+counts['geki']));
-          break;
-        case 1: // taiko
-          acc=(0.5*counts['100']+counts['300']+counts['geki'])/(counts['miss']+counts['100']+counts['300']+counts['geki']+counts['katu']);
-          break;
-        case 2:// ctb
-          acc=(counts['50']+counts['100']+counts['300'])/(counts['katu']+counts['miss']+counts['50']+counts['100']+counts['300']);
-          break;
-        case 3: // mania
-          acc=(50*counts['50']+100*counts['100']+200*counts['katu']+300*(counts['300']+counts["geki"]))/(300*(counts['miss']+counts['50']+counts['100']+counts['katu']+counts['300']+counts['geki']));
-          break;
+      // calc acc and max combo
+      let acc = 0, counts = score.counts, maxCombo=0;
+      for (let i in counts) counts[i] = parseInt(counts[i]);
+      try {
+        switch (data.mode) {
+          case 0: // standard
+            acc=(50*counts['50']+100*counts['100']+300*counts['300'])/(300*(counts['miss']+counts['50']+counts['100']+counts['300']));
+            //acc=(50*counts['50']+100*(counts['100']+counts['katu'])+300*(counts['300']+counts['geki']))/(300*(counts['miss']+counts['50']+counts['100']+counts['katu']+counts['300']+counts['geki']));
+            break;
+          case 1: // taiko
+            acc=(0.5*counts['100']+counts['300']+counts['geki']+0.5*counts['katu'])/(counts['miss']+counts['100']+counts['300']+counts['geki']+counts['katu']);
+            break;
+          case 2:// ctb
+            acc=(counts['50']+counts['100']+counts['300'])/(counts['katu']+counts['miss']+counts['50']+counts['100']+counts['300']);
+            break;
+          case 3: // mania
+            acc=(50*counts['50']+100*counts['100']+200*counts['katu']+300*(counts['300']+counts["geki"]))/(300*(counts['miss']+counts['50']+counts['100']+counts['katu']+counts['300']+counts['geki']));
+            break;
+        }
+        acc *= 100;
+      } catch (e) {
+        channel.send(e);
+        console.log(e);
+        acc = "err";
+        maxCombo = "err";
       }
-      acc *= 100;
-    } catch (e) {
-      sendMessage(e);
-      console.log(e);
-      acc = "err";
-      maxCombo = "err";
-    }
-    if (beatmap.maxCombo) maxCombo = beatmap.maxCombo;
+      if (beatmap.maxCombo) maxCombo = beatmap.maxCombo;
 
-    // do the rest of the things
-    let embed = new Discord.RichEmbed();
-    embed.setTitle('New ' + modes[data.mode] + ' Score! (#'+number+" user best)");
-    let fieldText = "";
+      // do the rest of the things
+      let embed = new Discord.RichEmbed();
+      embed.setTitle('New ' + modes[data.mode] + ' Score! (#'+number+" user best)");
+      let fieldText = "";
 
-    // beatmap link
-    fieldText += '['+beatmap.title +'['+beatmap.version+']](https://osu.ppy.sh/b/'+beatmap.id+')';
-    fieldText += '\n';
+      // beatmap link
+      fieldText += '['+beatmap.title +'['+beatmap.version+']](https://osu.ppy.sh/b/'+beatmap.id+')';
+      fieldText += '\n';
 
-    // beatmap info
-    fieldText += beatmap.bpm + 'bpm, ' + parseFloat(beatmap.difficulty.rating).toFixed(2) + ' stars';
-    fieldText += '\n';
+      // beatmap info
+      fieldText += beatmap.bpm + 'bpm, ' + parseFloat(beatmap.difficulty.rating).toFixed(2) + ' stars';
+      fieldText += '\n';
 
-    //rank
-    fieldText += 'Rank: ' + score.rank + ` (${acc.toFixed(2)}%)`;
-    fieldText += '\n';
+      //rank
+      fieldText += 'Rank: ' + score.rank + ` (${acc.toFixed(2)}%)`;
+      fieldText += '\n';
 
-    // mods TODO: var mods = ""; later: if mods=="" mods = "No mods\n"
-    if (score.mods.length > 0) {
-      for (let i in score.mods) {
-        i = score.mods[i];
-        if (i.includes('FreeModAllowed')) continue;
-        if (score.mods.includes('Nightcore') && i.includes('DoubleTime')) continue;
-        fieldText += i + ' ';
+      // mods
+      if (score.mods.length > 0) {
+        for (let i in score.mods) {
+          i = score.mods[i];
+          if (i.includes('FreeModAllowed')) continue;
+          if (score.mods.includes('Nightcore') && i.includes('DoubleTime')) continue;
+          fieldText += i + ' ';
+        }
+      } else fieldText += "No mods";
+      fieldText += '\n';
+
+      //user acc
+      let userAcc = "";
+      if (user_.accuracy != userThings.acc && (user_.accuracy - userThings.acc).toFixed(2)!=0) {
+        userAcc += " " + (user_.accuracy < userThings.acc?"" : "+");
+        userAcc += (user_.accuracy - userThings.acc).toFixed(2) + "%";
       }
-    } else fieldText += "No mods";
-    fieldText += '\n';
 
-    // pp and add field
-    embed.addField("**" + score.pp + "pp** (+" + (ppOld-ppNew).toFixed(2) + 'pp)', fieldText);
-    // ==================================================
-    embed.setAuthor(data.username, 'https://a.ppy.sh/' + data.user, 'https://osu.ppy.sh/u/'+data.user);
-    embed.setImage('https://b.ppy.sh/thumb/'+beatmap.beatmapSetId+'l.jpg');
-    sendMessage(embed);
-    //userScores[user_.id+"_"+data.mode].ranks = {g:user_.pp.rank, c:user_.pp.countryRank};
+      // pp, acc and add field
+      embed.addField("**" + score.pp + "pp** (+" + (ppOld-ppNew).toFixed(2) + 'pp)' + userAcc, fieldText);
+      // ==================================================
+      embed.setAuthor(data.username, 'https://a.ppy.sh/' + data.user, 'https://osu.ppy.sh/u/'+data.user);
+      embed.setImage('https://b.ppy.sh/thumb/'+beatmap.beatmapSetId+'l.jpg');
+      channel.send(embed);
+      //userScores[user_.id+"_"+data.mode].ranks = {g:user_.pp.rank, c:user_.pp.countryRank};
+      userScores[user_.id+"_"+data.mode].acc = user_.accuracy;
+    }).catch(ignore);
   }).catch(ignore);
 }
 
-function beatmapInfo(id, mode, channel_) {
-  BeatmapDatabase.getBeatmaps({b:id, m:mode, a:1}).then(beatmap => {
-    beatmap = beatmap[0];
+// beatmap info function
+function beatmapInfo(id, mode, chan) {
+  getBeatmap({b:id, m:mode, a:1}).then(beatmap => {
     let embed = new Discord.RichEmbed();
     embed.setTitle(beatmap.title+' ['+beatmap.version+']');
     let fieldText = 'Mapper: ' + beatmap.creator + '\n';
     fieldText += 'Bpm: ' + beatmap.bpm + '\n';
+    // time
     let time = parseInt(beatmap.time.total)
     let seconds = time%60;
     let mins = (time-seconds)/60;
@@ -352,27 +428,22 @@ function beatmapInfo(id, mode, channel_) {
     // ==================================================
     //embed.setAuthor(data.username, 'https://a.ppy.sh/' + data.user, 'https://osu.ppy.sh/u/'+data.user);
     embed.setImage('https://b.ppy.sh/thumb/'+beatmap.beatmapSetId+'l.jpg');
-    sendMessage(embed, undefined, channel_);
+    chan.send(embed);
   });
 }
 
-var Data = function(user, mode, userId) {
-  this.mode = mode;
-  this.username = user;
-  this.user = userId;
-}
-Data.prototype.getOptions = function() {
-  return {u:this.user, m:this.mode, type:'id', limit:100, a:1};
+
+class Data {
+  constructor(user, mode, userId){
+    this.mode = mode;
+    this.username = user;
+    this.user = userId;
+  }
+  getOptions() {
+    return {u:this.user, m:this.mode, type:'id', limit:100, a:1};
+  }
 }
 
-function checkAll() {
-  var CHECKcount = 0;
-  setInterval(() => {
-    if (CHECKcount > data.length) CHECKcount = 0;
-    if (data[CHECKcount]) check(data[CHECKcount]);
-    CHECKcount++;
-  }, 500);
-}
 function check(data) {
   // get user best
   if (!userScores[data.user+"_"+data.mode]) return console.log('error with ' + data.username+"."+modes[data.mode]);
@@ -427,139 +498,98 @@ function check(data) {
       }
     }
 
-
     // update the user ranks
     osuApi.getUser(data.getOptions()).then(user_ => {
       userScores[user_.id+"_"+data.mode].rank = {g:user_.pp.rank, c:user_.pp.countryRank};
     }).catch(ignore);
   }).catch(ignore);
 }
+
+// unintelligable save function
 function save() {
   let nd = [];
   for (let i in data) {
     if (!data[i] || !data[i].user) continue;
     nd.push({username:data[i].username, mode:data[i].mode, user:data[i].user});
   }
-  let s = JSON.stringify({'data':nd});
+  let s = JSON.stringify({'data':nd, "beatmaps":beatmaps});
   fs.writeFile('./data.json', s);
 }
 
-/// Readline shit
-readline.createInterface({input:process.stdin, output:process.stdout}).on('line', (line)=> {
-  try {
-    console.log(eval(line));
-  } catch(e) {
-    console.log(e);
-  }
-});
 
-/*
-function sendData_FIXGLOBALCOUNTRYRANKINGANDCOMBO(data, score, number, newScores) {
-  let oldScores = userScores[data.user+"_"+data.mode].scores;
-  osuApi.getBeatmaps({b:score.beatmapId}).then(beatmap => {
-    beatmap = beatmap[0];
-    // update the user ranks
-    osuApi.getUser(data.getOptions()).then(user_ => {
-      //calc diff in pp
-      let ppOld = 0, ppNew = 0;
-      for (let n in newScores) {
-        ppOld += parseFloat(newScores[n].pp * Math.pow(0.95, n));
-        ppNew += parseFloat(oldScores[n].pp * Math.pow(0.95, n));
-      }
-      if (ppOld-ppNew == 0) return;
-      if (ppOld-ppNew<0) {
-        score = oldScores[number-1];
-        //look for the beatmap
-        for (let n = number-5; n < oldScores.length; n++) {
-          let newScore = newScores[n];
-          if (newScore.beatmapId == score.beatmapId) {
-            score = newScore;
-            number = n+1;
-            console.log("pp lost");
-            return sendData(data, score, number, newScores);
-          }
+
+
+// beatmap database get function
+function getBeatmap(options) {
+  console.log(">>>>>getting beatmap " + options.b + " with mode " + (options.m || "default"));
+  let p = new Promise((resolve, reject) => {
+    // options is the object passed to osuApi.getBeatmap;
+    if (!beatmaps[options.b] || !beatmaps[options.b][options.m||0]) {
+      // i dont think this is needed anymore
+      if (!options.mode) delete options.mode;
+      // this is needed for converts, otherwise all hell will break lose
+      options.a=1;
+      // get the beatmap
+      console.log("looking up beatmap on osu db");
+      osuApi.getBeatmaps(options).then(beatmap => {
+        console.log("found beatmap on osu db");
+        // fix beatmap (delete unused tags)
+        beatmap = beatmap[0];
+        delete beatmap.tags; 
+        delete beatmap.counts; 
+        delete beatmap.hash; 
+        delete beatmap.approvedDate; 
+        delete beatmap.lastUpdate;
+        // make sure the beatmap can be added
+        if (!beatmaps[options.b]) beatmaps[options.b] = [];
+        // and add it
+        beatmaps[options.b][options.m||0] = beatmap;
+        // save changes
+        save();
+        // return the beatmap
+        resolve(beatmap);
+      })
+      // on error
+      .catch((e) => {
+        console.log("not found, trying again with no mode");
+        delete options.m;
+        // need to check local db first
+        if (!beatmaps[options.b] || !beatmaps[options.b][0]) {
+          console.log("looking up beatmap on osu db (no mode)");
+          osuApi.getBeatmaps(options).then(beatmap => {
+            console.log("found beatmap on osu db");
+            // fix beatmap (delete unused tags)
+            beatmap = beatmap[0];
+            delete beatmap.tags; 
+            delete beatmap.counts; 
+            delete beatmap.hash; 
+            delete beatmap.approvedDate; 
+            delete beatmap.lastUpdate;
+            
+            // make sure the beatmap can be added
+            if (!beatmaps[options.b]) beatmaps[options.b] = [];
+            // and add it
+            beatmaps[options.b][0] = beatmap;
+            // save changes
+            save();
+            // return the beatmap
+            resolve(beatmap);
+          })
+          // on error
+          .catch((e) => {
+            console.log("not found, giving up");
+          });
+        } 
+        else { // found in local db
+          console.log('found beatmap in local db');
+          resolve(beatmaps[options.b][options.m||0]); 
         }
-      }
-
-      // calc acc and max combo
-      let acc = 0, counts = score.counts, maxCombo=0;
-      for (let i in counts) counts[i] = parseInt(counts[i]);
-      try {
-        switch (data.mode) {
-          case 0: // standard
-            acc=(50*counts['50']+100*(counts['100']+counts[katu])+300*(counts['300']+counts['geki']))/(300*(counts['50']+counts['100']+counts['300']));
-            //maxCombo = counts['50'] + counts['100'] + counts['katu'] + counts['300'] + counts['geki'] + counts['miss'];
-            break;
-          case 1: // taiko
-            acc=(0.5*counts['100']+counts['300']+counts['geki'])/(counts['miss']+counts['100']+counts['300']+counts['geki']+counts['katu']);
-            //maxCombo = counts['100'] + counts['300'] + counts['miss'];
-            break;
-          case 2:// ctb
-            acc=(counts['50']+counts['100']+counts['300'])/(counts['katu']+counts['miss']+counts['50']+counts['100']+counts['300']);
-            //maxCombo = counts['50']+counts['100']+counts['300'] + counts[miss];
-            break;
-          case 3: // mania
-            acc=(50*counts['50']+100*counts['100']+200*counts['katu']+300*(counts['300']+counts["geki"])/(300*(counts['50']+counts['100']+counts['300']+counts['geki']));
-            //maxCombo = counts['50'] + counts['100'] + counts['katu'] + counts['300'] + counts['geki'] + counts['miss'];
-            break;
-        }
-        acc *= 100;
-      } catch (e) {
-        sendMessage(e);
-        console.log(e);
-        acc = "err";
-        maxCombo = "err";
-      }
-      if (beatmap.maxCombo) maxCombo = beatmap.maxCombo;
-
-      // do the rest of the things
-      let embed = new Discord.RichEmbed();
-      embed.setTitle('New ' + modes[data.mode] + ' Score! (#'+number+" user best)");
-      let fieldText = "";
-
-      // beatmap link
-      fieldText += '['+beatmap.title +'['+beatmap.version+']](https://osu.ppy.sh/b/'+beatmap.id+')';
-      fieldText += '\n';
-
-      // beatmap info
-      fieldText += beatmap.bpm + 'bpm, ' + parseFloat(beatmap.difficulty.rating).toFixed(2) + ' stars';
-      fieldText += '\n';
-
-      // combo etc
-      //fieldText += "Max Combo: " + score.maxCombo + '/'+ maxCombo + ', Rank: ' + score.rank + `(${acc.toFixed(2)}%)`;
-      fieldText += 'Rank: ' + score.rank + ` (${acc.toFixed(2)}%)`;
-      fieldText += '\n';
-
-      // mods TODO: var mods = ""; later: if mods=="" mods = "No mods\n"
-      if (score.mods.length > 0) {
-        for (let i in score.mods) {
-          i = score.mods[i];
-          if (i.includes('FreeModAllowed')) continue;
-          if (score.mods.includes('Nightcore') && i.includes('DoubleTime')) continue;
-          fieldText += i + ' ';
-        }
-      } else fieldText += "No mods";
-      fieldText += '\n';
-
-      // pp and add field
-      embed.addField("**" + score.pp + "pp** (+" + (ppOld-ppNew).toFixed(2) + 'pp)', fieldText);
-      // ==================================================
-      let userThings = userScores[user_.id+"_"+data.mode];
-      let rankStr = "";
-      console.log("global", user_.pp.rank, ":", userThings.ranks.g);
-      console.log("country", user_.pp.countryRank, ":", userThings.ranks.c)
-
-      if (user_.pp.rank < userThings.ranks.g) {
-        rankStr += " #" + user_.pp.rank + " +" + (userThings.ranks.g-user_.pp.rank);
-        if (user_.pp.countryRank < userThings.ranks.c) {
-          rankStr += " ("+user_.country + user_.pp.countryRank + " +" + (userThings.ranks.c - user_.pp.countryRank) + ")";
-        }
-      }
-      embed.setAuthor(data.username + rankStr, 'https://a.ppy.sh/' + data.user, 'https://osu.ppy.sh/u/'+data.user);
-      embed.setImage('https://b.ppy.sh/thumb/'+beatmap.beatmapSetId+'l.jpg');
-      sendMessage(embed);
-      userScores[user_.id+"_"+data.mode].ranks = {g:user_.pp.rank, c:user_.pp.countryRank};
-    }).catch(ignore);
-  }).catch(ignore);
+      });
+    }
+    else { // found in local db
+      console.log('found beatmap in local db')
+      resolve(beatmaps[options.b][options.m||0]);
+    }
+  });
+  return p;
 }
-*/

@@ -3,6 +3,8 @@ var osuApi = global.osuApi;
 var beatmaps = {}; // beatmaps[beatmapid] = []; // beatmaps[beatmapid][mode];
 var database = require('./database.json');
 var fs = require('fs');
+
+// lets try to fix this
 function getBeatmaps(options) {
   console.log(">>>>>getting beatmap " + options.b);
   try {
@@ -18,7 +20,7 @@ function getBeatmaps(options) {
           delete beatmap.hash;
           delete beatmap.approvedDate;
           delete beatmap.lastUpdate;
-          beatmaps[options.b] = [];
+          if (!beatmaps[options.b]) beatmaps[options.b] = [];
           beatmaps[options.b][options.m||0] = beatmap;
           save();
           resolve([beatmap]);
